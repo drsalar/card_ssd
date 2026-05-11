@@ -321,6 +321,7 @@ func (r *Room) HumanCount() int {
 }
 
 // AddBotTimer 登记一个 bot 定时器，房间销毁时统一停止
+// 调用者可能持锁也可能未持锁；当前所有调用点都是单一协程顺序触发，未做额外锁保护
 func (r *Room) AddBotTimer(t *time.Timer) {
 	if t == nil {
 		return

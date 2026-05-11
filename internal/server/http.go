@@ -1,10 +1,9 @@
 // Package server HTTP 路由（Gin）
-// http.go: /api/health, /api/login, /api/room/create, /api/room/:id 与 CORS
+// http.go: /api/health, /api/login, /api/lobby/active-room, /api/room/:id 与 CORS
 package server
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"card_ssd/internal/handler"
@@ -32,7 +31,6 @@ func NewEngine() *gin.Engine {
 		api.GET("/health", apiHealth)
 		api.POST("/login", apiLogin)
 		api.GET("/lobby/active-room", apiActiveRoom)
-		api.POST("/room/create", apiCreateRoom)
 		api.GET("/room/:id", apiGetRoom)
 	}
 	return r
@@ -113,37 +111,6 @@ func apiActiveRoom(c *gin.Context) {
 	})
 }
 
-// apiCreateRoom HTTP 创建房间（实际加入仍走 WS JOIN_ROOM）
-type createRoomBody struct {
-	WithMa      bool `json:"withMa"`
-	TotalRounds int  `json:"totalRounds"`
-	MaxPlayers  int  `json:"maxPlayers"`
-}
-
-func apiCreateRoom(c *gin.Context) {
-	token := extractToken(c)
-	info, ok := session.LookupByToken(token)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "token 无效"})
-		return
-	}
-	var body createRoomBody
-	_ = c.ShouldBindJSON(&body)
-	if body.TotalRounds <= 0 {
-		body.TotalRounds = 5
-	}
-	if body.MaxPlayers <= 0 {
-		body.MaxPlayers = 4
-	}
-	rule := room.Rule{
-		WithMa:      body.WithMa,
-		TotalRounds: body.TotalRounds,
-		MaxPlayers:  body.MaxPlayers,
-	}
-	r := room.CreateRoom(rule, info.Openid)
-	c.JSON(http.StatusOK, gin.H{"roomId": r.ID})
-}
-
 // apiGetRoom 查询房间概要
 func apiGetRoom(c *gin.Context) {
 	id := c.Param("id")
@@ -156,20 +123,6 @@ func apiGetRoom(c *gin.Context) {
 	state := r.ToState()
 	r.Unlock()
 	c.JSON(http.StatusOK, state)
-}
-
-// extractToken 从 query/header 中获取 token
-func extractToken(c *gin.Context) string {
-	if t := c.Query("token"); t != "" {
-		return t
-	}
-	if t := c.GetHeader("X-Token"); t != "" {
-		return t
-	}
-	if t := c.GetHeader("Authorization"); t != "" {
-		return strings.TrimPrefix(t, "Bearer ")
-	}
-	return ""
 }
 
 func tail4(s string) string {

@@ -191,7 +191,19 @@ func HandleRoundConfirm(s *session.Session, raw json.RawMessage, reqID json.RawM
 	}
 	r.BroadcastState()
 	allConfirmed := r.AllRoundConfirmed()
+	// 兜底：若仍有 bot 未确认，主动重新调度一次（Schedule 内部 idempotent，已 confirmed 的会自行跳过）
+	pendingBots := make([]string, 0)
+	if !allConfirmed {
+		for _, pp := range r.Players {
+			if pp.IsBot && !pp.RoundConfirmed {
+				pendingBots = append(pendingBots, pp.Openid)
+			}
+		}
+	}
 	r.Unlock()
+	for _, oid := range pendingBots {
+		room.ScheduleBotConfirm(r, oid)
+	}
 	if allConfirmed {
 		advanceAfterAllConfirmed(r)
 	}

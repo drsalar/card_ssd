@@ -224,20 +224,38 @@ func HandleDisconnect(s *session.Session) {
 			rr.Unlock()
 			return
 		}
-		// 自动按头 3/中 5/尾 5 提交（视为散牌）
-		if !pp.Submitted && len(pp.Hand) == 13 {
-			pp.Lanes = autoSplitLanes(pp.Hand)
-			pp.Submitted = true
+		// 根据阶段做不同的兜底处理：
+		// - Playing：自动按头 3/中 5/尾 5 提交（视为散牌），并视情况触发结算
+		// - Waiting / MatchEnd：玩家长时间未回，直接踢出避免永久占座
+		// - Comparing：保持 Offline 占座（积分已结算，整场内座次不变），不做处理
+		needDestroy := false
+		needSettle := false
+		switch rr.Phase {
+		case PhasePlaying:
+			if !pp.Submitted && len(pp.Hand) == 13 {
+				pp.Lanes = autoSplitLanes(pp.Hand)
+				pp.Submitted = true
+			}
+			needSettle = rr.AllSubmitted()
+		case PhaseWaiting, PhaseMatchEnd:
+			rr.RemovePlayer(openid)
+			needDestroy = rr.HumanCount() == 0
 		}
-		needSettle := rr.Phase == PhasePlaying && rr.AllSubmitted()
+		// 房间内已无在线真人时，立即销毁，避免空转（例如所有真人同时关游戏，仅剩 bot）
+		if !needDestroy && !hasOnlineHuman(rr) {
+			needDestroy = true
+		}
+		if !needDestroy {
+			rr.BroadcastState()
+		}
 		hook := autoSettleHook
 		rr.Unlock()
+		if needDestroy {
+			DestroyRoom(roomID)
+			return
+		}
 		if needSettle && hook != nil {
 			hook(rr)
-		} else {
-			rr.Lock()
-			rr.BroadcastState()
-			rr.Unlock()
 		}
 	})
 	rmu.Lock()
@@ -269,6 +287,17 @@ func autoSplitLanes(cards []game.Card) *game.Lanes {
 		Middle: cards[3:8],
 		Tail:   cards[8:13],
 	}
+}
+
+// hasOnlineHuman 判断房间是否仍有在线真人玩家
+// 调用前应已持有 r.mu
+func hasOnlineHuman(r *Room) bool {
+	for _, p := range r.Players {
+		if !p.IsBot && !p.Offline {
+			return true
+		}
+	}
+	return false
 }
 
 // RoomSummary 活跃房间摘要（仅用于 HTTP 查询，不修改任何状态）
