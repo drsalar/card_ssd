@@ -43,7 +43,7 @@ card_ssd
     │   ├── card.go               // 卡牌、牌堆、洗牌、加色规则
     │   ├── evaluator.go          // 牌型识别与比较（10 种牌型）
     │   ├── validator.go          // 三道大小校验
-    │   └── settle.go             // 比牌结算（特殊加分、打枪、本垒打、马牌倍率）
+    │   └── settle.go             // 比牌结算（特殊加分、打枪、本垒打、马牌倍率；本垒打支持 2-6 人，2 人场打枪对方即同时构成本垒打 ×2）
     ├── session
     │   ├── session.go            // 单个 WS 会话：发送/接收/Ping 保活
     │   └── manager.go            // connID/openid/token 三索引、顶号、批量关闭
@@ -63,7 +63,7 @@ card_ssd
 | Method | Path                       | 说明                                                                   |
 | ------ | -------------------------- | ---------------------------------------------------------------------- |
 | `GET`  | `/api/health`              | 健康检查，返回 `{ ok, time, rooms, conns }`                            |
-| `POST` | `/api/login`               | 登录，body `{ openid, nickname, avatarUrl }`（`nickname/avatarUrl` 由客户端从 `wx.getUserInfo` 获取后透传，会覆盖 `Session.Nickname/AvatarUrl`），返回 `{ token, openid, nickname, activeRoom }`；`activeRoom` 为该 openid 当前未结束房间的摘要或 `null` |
+| `POST` | `/api/login`               | 登录，body `{ openid, nickname, avatarUrl }`（`nickname/avatarUrl` 由客户端通过 `wx.createUserInfoButton` 由用户主动授权后透传，会覆盖 `Session.Nickname/AvatarUrl`），返回 `{ token, openid, nickname, activeRoom }`；`activeRoom` 为该 openid 当前未结束房间的摘要或 `null` |
 | `GET`  | `/api/lobby/active-room`   | 仅查询 `activeRoom`，query `?openid=xxx`，返回 `{ activeRoom }`；**只读**，不修改任何在线状态 |
 | `POST` | `/api/room/create`         | 创建房间，需 token，body `{ withMa, totalRounds, maxPlayers }`，返回 `{ roomId }` |
 | `GET`  | `/api/room/:id`            | 查询房间概要，不存在返回 404                                            |

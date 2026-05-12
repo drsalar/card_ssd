@@ -145,10 +145,11 @@ func Settle(players []SettleInput, withMa bool) SettleResult {
 		}
 	}
 
-	// 本垒打：n>=3，且某玩家对所有对手都打枪
+	// 本垒打：n>=2，且某玩家对所有对手都打枪
+	// 2 人场玩家三道全胜对方时，同时构成"打枪"与"本垒打"两个独立加倍标记，与多人场口径一致。
 	homerunOpenids := make([]string, 0)
 	homerunIdx := make(map[int]bool)
-	if n >= 3 {
+	if n >= 2 {
 		for i := 0; i < n; i++ {
 			if evals[i] == nil {
 				continue
