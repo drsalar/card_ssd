@@ -33,6 +33,7 @@ func InitGameHandler() {
 func StartRound(r *room.Room) {
 	r.Lock()
 	r.Phase = room.PhasePlaying
+	r.Touch()
 	// 重置一局相关数据（保留 score）
 	for _, p := range r.Players {
 		p.Hand = nil
@@ -115,6 +116,7 @@ func HandleSubmitLanes(s *session.Session, raw json.RawMessage, reqID json.RawMe
 	}
 	p.Lanes = &game.Lanes{Head: req.Head, Middle: req.Middle, Tail: req.Tail}
 	p.Submitted = true
+	r.Touch()
 	r.BroadcastState()
 	allSubmitted := r.AllSubmitted()
 	r.Unlock()
@@ -132,6 +134,7 @@ func DoSettle(r *room.Room) {
 		return
 	}
 	r.Phase = room.PhaseComparing
+	r.Touch()
 	// 构造结算输入
 	inputs := make([]game.SettleInput, len(r.Players))
 	for i, p := range r.Players {
@@ -217,6 +220,7 @@ func advanceAfterAllConfirmed(r *room.Room) {
 	if r.Phase != room.PhaseComparing {
 		return
 	}
+	r.Touch()
 	if r.CurrentRound >= r.Rule.TotalRounds {
 		r.Phase = room.PhaseMatchEnd
 		ranks := make([]map[string]any, len(r.Players))

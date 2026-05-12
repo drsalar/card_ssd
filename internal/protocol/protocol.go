@@ -30,6 +30,11 @@ const (
 	MsgRoomAddBotOK  = "ROOM_ADD_BOT_OK"
 	MsgRoomKickBot   = "ROOM_KICK_BOT"
 	MsgRoomKickBotOK = "ROOM_KICK_BOT_OK"
+
+	// 投票解散对局相关协议
+	MsgVoteDissolve        = "VOTE_DISSOLVE"         // 客户端 → 服务端：发起/同意解散
+	MsgVoteDissolveCancel  = "VOTE_DISSOLVE_CANCEL"  // 客户端 → 服务端：撤销同意
+	MsgVoteDissolveTimeout = "VOTE_DISSOLVE_TIMEOUT" // 服务端 → 客户端：投票 60 秒超时通知
 )
 
 // 错误码常量

@@ -43,6 +43,7 @@ type Player struct {
 	Submitted      bool
 	RoundConfirmed bool
 	IsBot          bool // 是否电脑玩家
+	VoteDissolve   bool // 是否已投票同意解散对局
 }
 
 // Room 房间
@@ -62,6 +63,12 @@ type Room struct {
 	botTimers []*time.Timer
 	// destroyed 房间销毁标记，避免回调在销毁后继续执行
 	destroyed bool
+	// AllOfflineSince 全员真人玩家离线起始时间戳（毫秒）；任意一人重连时清零
+	AllOfflineSince int64
+	// LastActiveAt 房间最后一次活跃时间（毫秒），用于多房间重连时优先选最新
+	LastActiveAt int64
+	// voteTimer 投票解散 60 秒倒计时定时器
+	voteTimer *time.Timer
 
 	mu sync.Mutex
 }
@@ -115,7 +122,14 @@ func (r *Room) AddPlayer(s *session.Session) *Player {
 		ConnID:    s.ConnID,
 	}
 	r.Players = append(r.Players, p)
+	r.LastActiveAt = time.Now().UnixMilli()
 	return p
+}
+
+// Touch 更新房间最近活跃时间戳
+// 调用前应当已加锁。
+func (r *Room) Touch() {
+	r.LastActiveAt = time.Now().UnixMilli()
 }
 
 // ReconnectPlayer 玩家重连：刷新连接信息
@@ -133,6 +147,7 @@ func (r *Room) ReconnectPlayer(s *session.Session) *Player {
 	}
 	p.Offline = false
 	p.OfflineSince = 0
+	r.LastActiveAt = time.Now().UnixMilli()
 	return p
 }
 
@@ -197,14 +212,15 @@ func (r *Room) ResetRound() {
 
 // PlayerState 房间状态广播中的玩家信息
 type PlayerState struct {
-	Openid    string `json:"openid"`
-	Nickname  string `json:"nickname"`
-	AvatarUrl string `json:"avatarUrl"`
-	Score     int    `json:"score"`
-	Ready     bool   `json:"ready"`
-	Offline   bool   `json:"offline"`
-	Submitted bool   `json:"submitted"`
-	IsBot     bool   `json:"isBot"`
+	Openid       string `json:"openid"`
+	Nickname     string `json:"nickname"`
+	AvatarUrl    string `json:"avatarUrl"`
+	Score        int    `json:"score"`
+	Ready        bool   `json:"ready"`
+	Offline      bool   `json:"offline"`
+	Submitted    bool   `json:"submitted"`
+	IsBot        bool   `json:"isBot"`
+	VoteDissolve bool   `json:"voteDissolve"`
 }
 
 // State ROOM_STATE 的载荷
@@ -222,14 +238,15 @@ func (r *Room) ToState() State {
 	players := make([]PlayerState, len(r.Players))
 	for i, p := range r.Players {
 		players[i] = PlayerState{
-			Openid:    p.Openid,
-			Nickname:  p.Nickname,
-			AvatarUrl: p.AvatarUrl,
-			Score:     p.Score,
-			Ready:     p.Ready,
-			Offline:   p.Offline,
-			Submitted: p.Submitted,
-			IsBot:     p.IsBot,
+			Openid:       p.Openid,
+			Nickname:     p.Nickname,
+			AvatarUrl:    p.AvatarUrl,
+			Score:        p.Score,
+			Ready:        p.Ready,
+			Offline:      p.Offline,
+			Submitted:    p.Submitted,
+			IsBot:        p.IsBot,
+			VoteDissolve: p.VoteDissolve,
 		}
 	}
 	return State{
@@ -338,6 +355,24 @@ func (r *Room) CancelBotTimers() {
 		}
 	}
 	r.botTimers = nil
+}
+
+// SetVoteTimer 设置投票解散倒计时定时器（先停止旧的）
+// 调用前应当已加锁。
+func (r *Room) SetVoteTimer(t *time.Timer) {
+	if r.voteTimer != nil {
+		r.voteTimer.Stop()
+	}
+	r.voteTimer = t
+}
+
+// CancelVoteTimer 停止并清空投票倒计时定时器
+// 调用前应当已加锁。
+func (r *Room) CancelVoteTimer() {
+	if r.voteTimer != nil {
+		r.voteTimer.Stop()
+		r.voteTimer = nil
+	}
 }
 
 // MarkDestroyed 设置房间销毁标记（在 Manager 销毁前调用）

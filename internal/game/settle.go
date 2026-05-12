@@ -72,6 +72,9 @@ type HandTypes struct {
 }
 
 // LaneScores 单玩家逐道得分汇总
+// 各道得分已包含：本道牌型特殊加分（冲三 / 中道 / 尾道）、打枪 ×2、本垒打 ×2、马牌 ×2 等所有倍率。
+// 满足 Head + Middle + Tail == FinalScore，便于前端面板分项展示与总分对账。
+// Extra 字段保留为 0 以兼容旧客户端，不再单独累计。
 type LaneScores struct {
 	Head   int `json:"head"`
 	Middle int `json:"middle"`
@@ -126,10 +129,9 @@ func Settle(players []SettleInput, withMa bool) SettleResult {
 	}
 
 	baseScores := make([]int, n)
-	laneScoresPerPlayer := make([]LaneScores, n)
 	pairs := make([]PairResult, 0, n*(n-1)/2)
 
-	// 两两比较
+	// 两两比较：先收集全部 pair，但不累计 LaneScores（待本垒打/马牌倍率确定后再统一累计）
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
 			ei, ej := evals[i], evals[j]
@@ -139,14 +141,6 @@ func Settle(players []SettleInput, withMa bool) SettleResult {
 			result := comparePair(i, j, ei, ej)
 			baseScores[i] += result.ScoreI
 			baseScores[j] += result.ScoreJ
-			laneScoresPerPlayer[i].Head += result.Head.ScoreI
-			laneScoresPerPlayer[i].Middle += result.Middle.ScoreI
-			laneScoresPerPlayer[i].Tail += result.Tail.ScoreI
-			laneScoresPerPlayer[i].Extra += result.Extra.ScoreI
-			laneScoresPerPlayer[j].Head += result.Head.ScoreJ
-			laneScoresPerPlayer[j].Middle += result.Middle.ScoreJ
-			laneScoresPerPlayer[j].Tail += result.Tail.ScoreJ
-			laneScoresPerPlayer[j].Extra += result.Extra.ScoreJ
 			pairs = append(pairs, result)
 		}
 	}
@@ -185,24 +179,40 @@ func Settle(players []SettleInput, withMa bool) SettleResult {
 		}
 	}
 
-	// 重新计算 final scores 应用本垒打倍率：与 i 相关的所有 pair 再×2
+	// 统一累计：按本垒打 ×2、马牌 ×2 累乘后再累加到 LaneScores 与 finalScores
+	// 关键约束：head + middle + tail == finalScore，便于结算面板分项展示与总分自洽
+	laneScoresPerPlayer := make([]LaneScores, n)
 	finalScores := make([]int, n)
 	for _, p := range pairs {
 		mul := 1
 		if homerunIdx[p.I] || homerunIdx[p.J] {
 			mul = 2
 		}
-		finalScores[p.I] += p.ScoreI * mul
-		finalScores[p.J] += p.ScoreJ * mul
-	}
-
-	// 马牌倍率：拥有红桃 5 的玩家最终分数 ×2
-	if withMa {
-		for i := 0; i < n; i++ {
-			if evals[i] != nil && evals[i].hasMa {
-				finalScores[i] *= 2
+		// 马牌倍率：拥有红桃 5 的玩家在每道每一项上额外 ×2（与打枪 / 本垒打可累乘）
+		mulI := mul
+		mulJ := mul
+		if withMa {
+			if evals[p.I] != nil && evals[p.I].hasMa {
+				mulI *= 2
+			}
+			if evals[p.J] != nil && evals[p.J].hasMa {
+				mulJ *= 2
 			}
 		}
+		hI := p.Head.ScoreI * mulI
+		mI := p.Middle.ScoreI * mulI
+		tI := p.Tail.ScoreI * mulI
+		hJ := p.Head.ScoreJ * mulJ
+		mJ := p.Middle.ScoreJ * mulJ
+		tJ := p.Tail.ScoreJ * mulJ
+		laneScoresPerPlayer[p.I].Head += hI
+		laneScoresPerPlayer[p.I].Middle += mI
+		laneScoresPerPlayer[p.I].Tail += tI
+		laneScoresPerPlayer[p.J].Head += hJ
+		laneScoresPerPlayer[p.J].Middle += mJ
+		laneScoresPerPlayer[p.J].Tail += tJ
+		finalScores[p.I] += hI + mI + tI
+		finalScores[p.J] += hJ + mJ + tJ
 	}
 
 	// 组装结果
@@ -236,6 +246,9 @@ func Settle(players []SettleInput, withMa bool) SettleResult {
 }
 
 // comparePair 比较两位玩家的三道
+// 关键约束：返回的 Head/Middle/Tail 的 ScoreI/ScoreJ 已经包含本道牌型特殊加分（冲三 / 中道 / 尾道）
+// 与对方在同一道上的特殊加分扣减；如发生打枪，三道分别 ×2。
+// 这样 head+middle+tail == ScoreI（pair 总分），便于上层按道累计后与总分自洽。
 func comparePair(i, j int, ei, ej *playerEval) PairResult {
 	headCmp := Compare(ei.head, ej.head)
 	midCmp := Compare(ei.middle, ej.middle)
@@ -244,46 +257,63 @@ func comparePair(i, j int, ei, ej *playerEval) PairResult {
 	middle := laneScore(midCmp)
 	tail := laneScore(tailCmp)
 
-	// 特殊加分（输方支付）
-	extraI, extraJ := 0, 0
-	// 冲三：头道三条
+	// 各道牌型特殊加分（输方支付）
+	// 头道：冲三
+	headBonusI, headBonusJ := 0, 0
 	if ei.head.Type == TypeThree && headCmp >= 0 {
-		extraI += HeadThreeBonus
+		headBonusI += HeadThreeBonus
 	}
 	if ej.head.Type == TypeThree && headCmp <= 0 {
-		extraJ += HeadThreeBonus
+		headBonusJ += HeadThreeBonus
 	}
-	// 中道
+	// 中道：葫芦/炸弹/同花顺/五龙
+	midBonusI, midBonusJ := 0, 0
 	if v, ok := midBonus[ei.middle.Type]; ok && midCmp >= 0 {
-		extraI += v
+		midBonusI += v
 	}
 	if v, ok := midBonus[ej.middle.Type]; ok && midCmp <= 0 {
-		extraJ += v
+		midBonusJ += v
 	}
-	// 尾道
+	// 尾道：炸弹/同花顺/五龙
+	tailBonusI, tailBonusJ := 0, 0
 	if v, ok := tailBonus[ei.tail.Type]; ok && tailCmp >= 0 {
-		extraI += v
+		tailBonusI += v
 	}
 	if v, ok := tailBonus[ej.tail.Type]; ok && tailCmp <= 0 {
-		extraJ += v
+		tailBonusJ += v
 	}
 
-	// 打枪：i 三道全胜 j → i 整体加倍
+	// 将本道 bonus 合并进各道 ScoreI/ScoreJ：一道净分 = 胜负分 + 我方该道 bonus - 对方该道 bonus
+	head.ScoreI += headBonusI - headBonusJ
+	head.ScoreJ += headBonusJ - headBonusI
+	middle.ScoreI += midBonusI - midBonusJ
+	middle.ScoreJ += midBonusJ - midBonusI
+	tail.ScoreI += tailBonusI - tailBonusJ
+	tail.ScoreJ += tailBonusJ - tailBonusI
+
+	// 打枪：i 三道全胜 j → 整体加倍（每道独立 ×2，保证逐道之和仍等于 pair 总分）
 	gunI := headCmp > 0 && midCmp > 0 && tailCmp > 0
 	gunJ := headCmp < 0 && midCmp < 0 && tailCmp < 0
-
-	scoreI := head.ScoreI + middle.ScoreI + tail.ScoreI + extraI - extraJ
-	scoreJ := head.ScoreJ + middle.ScoreJ + tail.ScoreJ + extraJ - extraI
 	if gunI || gunJ {
-		scoreI *= 2
-		scoreJ *= 2
+		head.ScoreI *= 2
+		head.ScoreJ *= 2
+		middle.ScoreI *= 2
+		middle.ScoreJ *= 2
+		tail.ScoreI *= 2
+		tail.ScoreJ *= 2
 	}
+
+	scoreI := head.ScoreI + middle.ScoreI + tail.ScoreI
+	scoreJ := head.ScoreJ + middle.ScoreJ + tail.ScoreJ
+
+	extraI := headBonusI + midBonusI + tailBonusI
+	extraJ := headBonusJ + midBonusJ + tailBonusJ
 	return PairResult{
 		I:      i,
 		J:      j,
-		Head:   LaneCmp{Cmp: headCmp, ScoreI: head.ScoreI, ScoreJ: head.ScoreJ},
-		Middle: LaneCmp{Cmp: midCmp, ScoreI: middle.ScoreI, ScoreJ: middle.ScoreJ},
-		Tail:   LaneCmp{Cmp: tailCmp, ScoreI: tail.ScoreI, ScoreJ: tail.ScoreJ},
+		Head:   head,
+		Middle: middle,
+		Tail:   tail,
 		Extra: ExtraScore{
 			ScoreI: extraI - extraJ,
 			ScoreJ: extraJ - extraI,
@@ -299,12 +329,12 @@ func comparePair(i, j int, ei, ej *playerEval) PairResult {
 
 func laneScore(cmp int) LaneCmp {
 	if cmp > 0 {
-		return LaneCmp{ScoreI: 1, ScoreJ: -1}
+		return LaneCmp{Cmp: cmp, ScoreI: 1, ScoreJ: -1}
 	}
 	if cmp < 0 {
-		return LaneCmp{ScoreI: -1, ScoreJ: 1}
+		return LaneCmp{Cmp: cmp, ScoreI: -1, ScoreJ: 1}
 	}
-	return LaneCmp{}
+	return LaneCmp{Cmp: cmp}
 }
 
 // hasMa 玩家是否持有红桃 5

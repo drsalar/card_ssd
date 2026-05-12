@@ -22,6 +22,7 @@ func NewEngine() *gin.Engine {
 
 	// 启动游戏 handler 钩子
 	handler.InitGameHandler()
+	handler.InitVoteHandler()
 
 	// WebSocket 路由
 	r.GET("/ws", handleWS)

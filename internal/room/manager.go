@@ -48,12 +48,20 @@ var (
 	rooms          = make(map[string]*Room)
 	offlineTimers  = make(map[string]*time.Timer) // openid -> timer
 	autoSettleHook AutoSettleHook
+	earlyEndHook   AutoSettleHook // 投票解散提前结算钩子（由 game handler 注入）
 )
 
 // SetAutoSettleHook 注入自动结算钩子
 func SetAutoSettleHook(h AutoSettleHook) {
 	rmu.Lock()
 	autoSettleHook = h
+	rmu.Unlock()
+}
+
+// SetEarlyEndHook 注入提前结算钩子（投票解散场景使用）
+func SetEarlyEndHook(h AutoSettleHook) {
+	rmu.Lock()
+	earlyEndHook = h
 	rmu.Unlock()
 }
 
@@ -97,10 +105,11 @@ func DestroyRoom(id string) {
 	if !ok || r == nil {
 		return
 	}
-	// 停止该房间上所有 bot 定时器，避免销毁后继续触发动作
+	// 停止该房间上所有 bot 定时器与投票定时器，避免销毁后继续触发动作
 	r.Lock()
 	r.MarkDestroyed()
 	r.CancelBotTimers()
+	r.CancelVoteTimer()
 	r.Unlock()
 	logger.Info("销毁房间 %s", id)
 }
@@ -164,8 +173,30 @@ func LeaveRoom(s *session.Session) *LeaveResult {
 	return &LeaveResult{Room: r, Destroyed: false}
 }
 
+// markAllOfflineIfNeeded 评估并更新房间的 AllOfflineSince 时间戳
+// 调用前应已持有 r.mu。仅 Phase 为 playing/comparing/match_end 且无在线真人时记录起始时间，
+// 任意一名真人重连 / 有玩家在线时清零
+func markAllOfflineIfNeeded(r *Room) {
+	if r == nil {
+		return
+	}
+	// waiting 阶段沉默：调用者主动在 waiting 阶段清零不一定需要处理，这里依据在线状况统一设置
+	if r.Phase == PhaseWaiting {
+		r.AllOfflineSince = 0
+		return
+	}
+	if hasOnlineHuman(r) {
+		r.AllOfflineSince = 0
+		return
+	}
+	// 仅在未设置起始时间时设置，避免重复覆盖导致超时计算偏迟
+	if r.AllOfflineSince == 0 {
+		r.AllOfflineSince = time.Now().UnixMilli()
+	}
+}
+
 // HandleDisconnect 处理断线
-// waiting 阶段直接移除；游戏阶段标记掉线 + 30 秒计时器兑底
+// waiting 阶段直接移除；游戏阶段标记掉线 + 30 秒计时器兌底
 // 顶号场景：新连接已绑定同 openid，旧连接被关闭触发本函数，需跳过以免误标 Offline
 func HandleDisconnect(s *session.Session) {
 	if s.RoomID == "" {
@@ -203,6 +234,7 @@ func HandleDisconnect(s *session.Session) {
 	// 对局中标记掉线
 	p.Offline = true
 	p.OfflineSince = time.Now().UnixMilli()
+	markAllOfflineIfNeeded(r)
 	r.BroadcastState()
 	r.Unlock()
 
@@ -224,7 +256,7 @@ func HandleDisconnect(s *session.Session) {
 			rr.Unlock()
 			return
 		}
-		// 根据阶段做不同的兜底处理：
+		// 根据阶段做不同的兌底处理：
 		// - Playing：自动按头 3/中 5/尾 5 提交（视为散牌），并视情况触发结算
 		// - Waiting / MatchEnd：玩家长时间未回，直接踢出避免永久占座
 		// - Comparing：保持 Offline 占座（积分已结算，整场内座次不变），不做处理
@@ -241,17 +273,27 @@ func HandleDisconnect(s *session.Session) {
 			rr.RemovePlayer(openid)
 			needDestroy = rr.HumanCount() == 0
 		}
-		// 房间内已无在线真人时，立即销毁，避免空转（例如所有真人同时关游戏，仅剩 bot）
-		if !needDestroy && !hasOnlineHuman(rr) {
-			needDestroy = true
+		// waiting 阶段仍然在上面踢出路径里销毁；其他阶段改为登记 AllOfflineSince 交给 24h 巡检处理
+		if !needDestroy {
+			markAllOfflineIfNeeded(rr)
+		}
+		// 投票提前结算：如果有玩家被踢出后、仍在场的真人玩家全部已同意解散，需触发提前结算
+		needEarlyEnd := false
+		if !needDestroy && checkAllHumansVoted(rr) {
+			needEarlyEnd = true
 		}
 		if !needDestroy {
 			rr.BroadcastState()
 		}
 		hook := autoSettleHook
+		endHook := earlyEndHook
 		rr.Unlock()
 		if needDestroy {
 			DestroyRoom(roomID)
+			return
+		}
+		if needEarlyEnd && endHook != nil {
+			endHook(rr)
 			return
 		}
 		if needSettle && hook != nil {
@@ -300,6 +342,28 @@ func hasOnlineHuman(r *Room) bool {
 	return false
 }
 
+// checkAllHumansVoted 检查房间内所有在线真人是否都已投票同意解散
+// 调用前应已持有 r.mu。仅在 playing/comparing 阶段需要评估；其他阶段返回 false。
+func checkAllHumansVoted(r *Room) bool {
+	if r == nil {
+		return false
+	}
+	if r.Phase != PhasePlaying && r.Phase != PhaseComparing {
+		return false
+	}
+	humanOnline := 0
+	for _, p := range r.Players {
+		if p.IsBot || p.Offline {
+			continue
+		}
+		humanOnline++
+		if !p.VoteDissolve {
+			return false
+		}
+	}
+	return humanOnline > 0
+}
+
 // RoomSummary 活跃房间摘要（仅用于 HTTP 查询，不修改任何状态）
 type RoomSummary struct {
 	RoomID       string `json:"roomId"`
@@ -312,7 +376,7 @@ type RoomSummary struct {
 // FindActiveRoomByOpenid 查询某 openid 当前所在的未结束房间
 // 该方法严格只读：不修改任何 Session 与 Player 的网络状态
 // 命中条件：房间存在、未销毁、且玩家仍在 Players 列表内
-// 若房间已进入 PhaseMatchEnd 之后被销毁 → 返回 nil
+// 多个候选时优先返回 LastActiveAt 最新的一个；时间戳相同时按 RoomID 字典序兑底
 func FindActiveRoomByOpenid(openid string) *RoomSummary {
 	if openid == "" {
 		return nil
@@ -324,6 +388,11 @@ func FindActiveRoomByOpenid(openid string) *RoomSummary {
 		candidates = append(candidates, r)
 	}
 	rmu.Unlock()
+	type hit struct {
+		summary *RoomSummary
+		active  int64
+	}
+	hits := make([]hit, 0, 4)
 	for _, r := range candidates {
 		r.Lock()
 		if r.IsDestroyed() {
@@ -334,15 +403,27 @@ func FindActiveRoomByOpenid(openid string) *RoomSummary {
 			r.Unlock()
 			continue
 		}
-		summary := &RoomSummary{
-			RoomID:       r.ID,
-			Phase:        string(r.Phase),
-			CurrentRound: r.CurrentRound,
-			TotalRounds:  r.Rule.TotalRounds,
-			MaxPlayers:   r.Rule.MaxPlayers,
-		}
+		hits = append(hits, hit{
+			summary: &RoomSummary{
+				RoomID:       r.ID,
+				Phase:        string(r.Phase),
+				CurrentRound: r.CurrentRound,
+				TotalRounds:  r.Rule.TotalRounds,
+				MaxPlayers:   r.Rule.MaxPlayers,
+			},
+			active: r.LastActiveAt,
+		})
 		r.Unlock()
-		return summary
 	}
-	return nil
+	if len(hits) == 0 {
+		return nil
+	}
+	best := hits[0]
+	for i := 1; i < len(hits); i++ {
+		h := hits[i]
+		if h.active > best.active || (h.active == best.active && h.summary.RoomID < best.summary.RoomID) {
+			best = h
+		}
+	}
+	return best.summary
 }

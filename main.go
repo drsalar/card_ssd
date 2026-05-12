@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"card_ssd/internal/logger"
+	"card_ssd/internal/room"
 	"card_ssd/internal/server"
 )
 
@@ -30,6 +31,11 @@ func main() {
 		Handler: engine,
 	}
 
+	// 启动空闲房间巡检（每小时一次，全员真人离线超 24 小时即销毁）
+	sweeperCtx, cancelSweeper := context.WithCancel(context.Background())
+	defer cancelSweeper()
+	room.StartIdleSweeper(sweeperCtx, room.SweeperDefaultInterval, room.SweeperDefaultThreshold)
+
 	// 异步启动 HTTP 服务
 	go func() {
 		logger.Info("服务端启动监听 %s", addr)
@@ -44,6 +50,9 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	logger.Info("收到退出信号，开始优雅关闭...")
+
+	// 取消巡检任务
+	cancelSweeper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

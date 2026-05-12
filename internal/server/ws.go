@@ -76,6 +76,10 @@ func dispatch(s *session.Session, env *protocol.Envelope) {
 		handler.HandleAddBot(s, env.Data, env.ReqID)
 	case protocol.MsgRoomKickBot:
 		handler.HandleKickBot(s, env.Data, env.ReqID)
+	case protocol.MsgVoteDissolve:
+		handler.HandleVoteDissolve(s, env.Data, env.ReqID)
+	case protocol.MsgVoteDissolveCancel:
+		handler.HandleVoteDissolveCancel(s, env.Data, env.ReqID)
 	default:
 		s.SendError(protocol.ErrBadRequest, "未知消息类型: "+env.Type, env.ReqID)
 	}
