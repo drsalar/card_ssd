@@ -108,7 +108,7 @@ card_ssd
 | `GET`  | `/api/health`              | 健康检查，返回 `{ ok, time, rooms, conns }`                            |
 | `POST` | `/api/login`               | 登录，body `{ openid, nickname, avatarUrl }`（`nickname/avatarUrl` 由客户端通过 `wx.createUserInfoButton` 由用户主动授权后透传，会覆盖 `Session.Nickname/AvatarUrl`），返回 `{ token, openid, nickname, activeRoom }`；`activeRoom` 为该 openid 当前未结束房间的摘要或 `null` |
 | `GET`  | `/api/lobby/active-room`   | 仅查询 `activeRoom`，query `?openid=xxx`，返回 `{ activeRoom }`；**只读**，不修改任何在线状态 |
-| `POST` | `/api/room/create`         | 创建房间，需 token，body `{ withMa, totalRounds, maxPlayers }`，返回 `{ roomId }` |
+| `POST` | `/api/room/create`         | 创建房间，需 token，body `{ withMa, totalRounds }`（房间人数上限服务端固定为 6，开局门槛为就绪人数 ≥ 2），返回 `{ roomId }` |
 | `GET`  | `/api/room/:id`            | 查询房间概要，不存在返回 404                                            |
 
 > token 通过 query `?token=` 或 header `X-Token` / `Authorization: Bearer <token>` 携带均可。
@@ -148,11 +148,10 @@ JSON 信封：`{ type, data, reqId, code, msg }`。
 
 - 用户档案 / 登录 token / 未结束房间 / 历史结算 在配置 `MYSQL_PWD` 时持久化到 MySQL；未配置时降级为纯内存（重启即清空）
 - 房间内最后一名玩家**主动离开**时，房间立即从内存销毁并写 `rooms.destroyed=1`
-- **进行中房间 24 小时保活**：当房间处于 `playing/comparing/match_end` 且所有真人玩家都离线时，服务端会登记 `AllOfflineSince`，任一真人重连即清零；`StartIdleSweeper` 每小时巡检一次，销毁“超过 24 小时仍未有真人上线”的房间
+- **房间 24 小时保活**：房间处于任何阶段（`waiting/playing/comparing/match_end`）且所有真人玩家都离线时，服务端会登记 `AllOfflineSince`，任一真人重连即清零；`StartIdleSweeper` 每小时巡检一次，销毁“超过 24 小时仍未有真人上线”的房间
 - 服务端进程重启：通过 `room.LoadFromStorage()` 把 `destroyed=0` 的房间整体还原到内存，全员视为离线，等待玩家重连后由原有重连流程恢复手牌 / 三道 / 阶段
-- **进行中房间 24 小时保活**：当房间处于 `playing/comparing/match_end` 且所有真人玩家都离线时，服务端会登记 `AllOfflineSince`，任一真人重连即清零；`StartIdleSweeper` 每小时巡检一次，销毁“超过 24 小时仍未有真人上线”的房间
 - 玩家断线 30 秒未重连的阶段化兜底：
-  - 准备阶段（`waiting`）：连接断开瞬间即移除
+  - 准备阶段（`waiting`）：仅标记 `Offline=true`，**不启动 30 秒踢出计时器**，仅由 24h 巡检接管；玩家可从大厅「重新进入」回房间继续等待开局
   - 对局阶段（`playing`）：自动以头 3/中 5/尾 5 散牌参与结算
   - 比牌阶段（`comparing`）：保留座位等待重连或整场结束（积分已固定）
   - 整场结束（`match_end`）：移除该玩家，避免永久占座

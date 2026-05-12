@@ -79,13 +79,11 @@ func HandleCreateRoom(s *session.Session, raw json.RawMessage, reqID json.RawMes
 	if req.TotalRounds <= 0 {
 		req.TotalRounds = 5
 	}
-	if req.MaxPlayers <= 0 {
-		req.MaxPlayers = 4
-	}
+	// 房间人数上限统一固定为 6（开局门槛由 AllReady 保证 ≥2）；忽略客户端传入的 MaxPlayers
 	rule := room.Rule{
 		WithMa:      req.WithMa,
 		TotalRounds: req.TotalRounds,
-		MaxPlayers:  req.MaxPlayers,
+		MaxPlayers:  6,
 	}
 	r := room.CreateRoom(rule, s.Openid)
 	res := room.JoinRoom(r.ID, s)
