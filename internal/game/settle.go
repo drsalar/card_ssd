@@ -184,27 +184,31 @@ func Settle(players []SettleInput, withMa bool) SettleResult {
 	// finalScore 由组装阶段直接以三道之和写入，确保两者绝对同源
 	laneScoresPerPlayer := make([]LaneScores, n)
 	for _, p := range pairs {
+		// pair 级倍率：本垒打 ×2、马牌 ×2 全部对该 pair 整体生效，可累乘
+		// 也即：只要 pair 中任意一方持有马牌，整 pair 在打枪基础上再 ×2，双方在该 pair 的所有得分都同步加倍。
+		// 这样能保证 pair 的零和性（双方加减分总和=0），并与打枪/本垒打一致地"对局加倍"。
 		mul := 1
 		if homerunIdx[p.I] || homerunIdx[p.J] {
-			mul = 2
+			mul *= 2
 		}
-		// 马牌倍率：拥有红桃 5 的玩家在每道每一项上额外 ×2（与打枪 / 本垒打可累乘）
-		mulI := mul
-		mulJ := mul
 		if withMa {
+			hasMaPair := false
 			if evals[p.I] != nil && evals[p.I].hasMa {
-				mulI *= 2
+				hasMaPair = true
 			}
 			if evals[p.J] != nil && evals[p.J].hasMa {
-				mulJ *= 2
+				hasMaPair = true
+			}
+			if hasMaPair {
+				mul *= 2
 			}
 		}
-		hI := p.Head.ScoreI * mulI
-		mI := p.Middle.ScoreI * mulI
-		tI := p.Tail.ScoreI * mulI
-		hJ := p.Head.ScoreJ * mulJ
-		mJ := p.Middle.ScoreJ * mulJ
-		tJ := p.Tail.ScoreJ * mulJ
+		hI := p.Head.ScoreI * mul
+		mI := p.Middle.ScoreI * mul
+		tI := p.Tail.ScoreI * mul
+		hJ := p.Head.ScoreJ * mul
+		mJ := p.Middle.ScoreJ * mul
+		tJ := p.Tail.ScoreJ * mul
 		laneScoresPerPlayer[p.I].Head += hI
 		laneScoresPerPlayer[p.I].Middle += mI
 		laneScoresPerPlayer[p.I].Tail += tI

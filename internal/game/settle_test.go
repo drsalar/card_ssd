@@ -122,3 +122,48 @@ func TestSettle_LaneConsistency_RandomMulti(t *testing.T) {
 		}
 	}
 }
+
+// TestSettle_MaPair_WidensMultiplier 验证「马牌按 pair 整体加倍」：
+// pair 中只要任意一方持有马牌（红桃 5），双方在该 pair 的所有得分都同步 ×2，
+// 与打枪 / 本垒打可累乘。这是图中 g25i 总分应为 +20 的核心规则。
+//
+// 构造场景（2 人局，避免本垒打/打枪干扰）：
+//
+//	pA：头道散牌 S2 S3 S4；中道散牌 H2 H3 H4 H7 H8（4 红心 + 1 红桃）= 散牌；
+//	    尾道散牌 D2 D3 D4 D7 D8 = 散牌（无 bonus）
+//	pB（带马牌 H5）：头道散牌 SK SQ SJ；中道散牌 HK HQ HJ H10 H5 = 散牌；
+//	    尾道散牌 DK DQ DJ D10 D9 = 散牌
+//	两人都散牌、都无 bonus。pA 三道全输给 pB，但因 2 人局不算打枪倍率（没有"对所有对手全胜"的本垒打概念，2 人时也无本垒打），
+//	仅打枪 ×2 生效。pB 对 pA 三道全胜 → 打枪 ×2；pB 持马 → pair 再 ×2 → 总倍率 ×4。
+//
+// 期望：pB +1*4 + 1*4 + 1*4 = +12；pA = -12。
+func TestSettle_MaPair_WidensMultiplier(t *testing.T) {
+	mk := func(openid string, head, middle, tail []Card) SettleInput {
+		hand := append(append(append([]Card{}, head...), middle...), tail...)
+		return SettleInput{
+			Openid: openid,
+			Hand:   hand,
+			Lanes:  &Lanes{Head: head, Middle: middle, Tail: tail},
+		}
+	}
+	pA := mk("A",
+		[]Card{{Suit: "S", Rank: 2}, {Suit: "S", Rank: 3}, {Suit: "S", Rank: 4}},
+		[]Card{{Suit: "C", Rank: 2}, {Suit: "C", Rank: 3}, {Suit: "C", Rank: 4}, {Suit: "S", Rank: 7}, {Suit: "S", Rank: 8}},
+		[]Card{{Suit: "D", Rank: 2}, {Suit: "D", Rank: 3}, {Suit: "D", Rank: 6}, {Suit: "D", Rank: 7}, {Suit: "D", Rank: 9}}, // 同花
+	)
+	pB := mk("B",
+		[]Card{{Suit: "S", Rank: 13}, {Suit: "S", Rank: 12}, {Suit: "S", Rank: 11}},
+		[]Card{{Suit: "H", Rank: 13}, {Suit: "H", Rank: 12}, {Suit: "H", Rank: 11}, {Suit: "H", Rank: 10}, {Suit: "H", Rank: 5}}, // 含马牌 H5，且为同花
+		[]Card{{Suit: "D", Rank: 13}, {Suit: "D", Rank: 12}, {Suit: "D", Rank: 11}, {Suit: "D", Rank: 10}, {Suit: "D", Rank: 8}}, // 同花
+	)
+
+	res := Settle([]SettleInput{pA, pB}, true)
+	assertSettleConsistent(t, "马牌 pair 整体加倍", res)
+
+	// pB 三道全胜 + 持马 → 2 人局打枪 ×2、马牌 ×2，总倍率 ×4
+	// 三道净分（不含特殊 bonus）= 1+1+1 = 3，乘以 4 = 12
+	if res.Players[1].FinalScore != 12 || res.Players[0].FinalScore != -12 {
+		t.Fatalf("马牌 pair 整体加倍：期望 pB=+12 / pA=-12，实际 pB=%d / pA=%d",
+			res.Players[1].FinalScore, res.Players[0].FinalScore)
+	}
+}
