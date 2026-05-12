@@ -63,7 +63,7 @@ card_ssd
 | Method | Path                       | 说明                                                                   |
 | ------ | -------------------------- | ---------------------------------------------------------------------- |
 | `GET`  | `/api/health`              | 健康检查，返回 `{ ok, time, rooms, conns }`                            |
-| `POST` | `/api/login`               | 登录，body `{ openid, nickname, avatarUrl }`，返回 `{ token, openid, nickname, activeRoom }`；`activeRoom` 为该 openid 当前未结束房间的摘要或 `null` |
+| `POST` | `/api/login`               | 登录，body `{ openid, nickname, avatarUrl }`（`nickname/avatarUrl` 由客户端从 `wx.getUserInfo` 获取后透传，会覆盖 `Session.Nickname/AvatarUrl`），返回 `{ token, openid, nickname, activeRoom }`；`activeRoom` 为该 openid 当前未结束房间的摘要或 `null` |
 | `GET`  | `/api/lobby/active-room`   | 仅查询 `activeRoom`，query `?openid=xxx`，返回 `{ activeRoom }`；**只读**，不修改任何在线状态 |
 | `POST` | `/api/room/create`         | 创建房间，需 token，body `{ withMa, totalRounds, maxPlayers }`，返回 `{ roomId }` |
 | `GET`  | `/api/room/:id`            | 查询房间概要，不存在返回 404                                            |
@@ -78,7 +78,7 @@ JSON 信封：`{ type, data, reqId, code, msg }`。
 
 | 类型                                              | 方向   | 说明                              |
 | ------------------------------------------------- | ------ | --------------------------------- |
-| `LOGIN`                                           | C→S    | 登录（携带 openid/昵称/头像）     |
+| `LOGIN`                                           | C→S    | 登录（携带 `openid/nickname/avatarUrl`，会覆盖 `Session.Nickname/AvatarUrl`，进房间 / `UpsertPlayer` 时同步到 `Player`，最终随 `ROOM_STATE` 广播） |
 | `CREATE_ROOM` / `JOIN_ROOM` / `LEAVE_ROOM`        | C→S    | 房间操作                          |
 | `READY` / `UNREADY`                               | C→S    | 准备状态切换                      |
 | `SUBMIT_LANES`                                    | C→S    | 提交三道开牌                      |

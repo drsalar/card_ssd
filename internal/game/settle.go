@@ -179,10 +179,10 @@ func Settle(players []SettleInput, withMa bool) SettleResult {
 		}
 	}
 
-	// 统一累计：按本垒打 ×2、马牌 ×2 累乘后再累加到 LaneScores 与 finalScores
+	// 统一累计：按本垒打 ×2、马牌 ×2 累乘后再累加到 LaneScores
 	// 关键约束：head + middle + tail == finalScore，便于结算面板分项展示与总分自洽
+	// finalScore 由组装阶段直接以三道之和写入，确保两者绝对同源
 	laneScoresPerPlayer := make([]LaneScores, n)
-	finalScores := make([]int, n)
 	for _, p := range pairs {
 		mul := 1
 		if homerunIdx[p.I] || homerunIdx[p.J] {
@@ -211,8 +211,6 @@ func Settle(players []SettleInput, withMa bool) SettleResult {
 		laneScoresPerPlayer[p.J].Head += hJ
 		laneScoresPerPlayer[p.J].Middle += mJ
 		laneScoresPerPlayer[p.J].Tail += tJ
-		finalScores[p.I] += hI + mI + tI
-		finalScores[p.J] += hJ + mJ + tJ
 	}
 
 	// 组装结果
@@ -233,12 +231,13 @@ func Settle(players []SettleInput, withMa bool) SettleResult {
 			hasMaFlag = evals[i].hasMa
 		}
 		out.Players[i] = PlayerSettleResult{
-			Openid:     p.Openid,
-			Lanes:      p.Lanes,
-			HandTypes:  ht,
-			HasMa:      hasMaFlag,
-			BaseScore:  baseScores[i],
-			FinalScore: finalScores[i],
+			Openid:    p.Openid,
+			Lanes:     p.Lanes,
+			HandTypes: ht,
+			HasMa:     hasMaFlag,
+			BaseScore: baseScores[i],
+			// finalScore 直接以三道汇总作为唯一来源，确保 head+middle+tail == finalScore 永远成立
+			FinalScore: laneScoresPerPlayer[i].Head + laneScoresPerPlayer[i].Middle + laneScoresPerPlayer[i].Tail,
 			LaneScores: laneScoresPerPlayer[i],
 		}
 	}
