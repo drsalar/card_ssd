@@ -10,6 +10,7 @@ import (
 	"card_ssd/internal/protocol"
 	"card_ssd/internal/room"
 	"card_ssd/internal/session"
+	"card_ssd/internal/storage"
 )
 
 // LoginReq 登录消息载荷
@@ -40,6 +41,17 @@ func HandleLogin(s *session.Session, raw json.RawMessage, reqID json.RawMessage)
 	if req.Openid == "" {
 		s.SendError(protocol.ErrBadRequest, "缺少 openid", reqID)
 		return
+	}
+	// 客户端未携带昵称/头像时，从 DB 回填，与 HTTP 登录口径一致
+	if req.Nickname == "" || req.AvatarUrl == "" {
+		if dbNick, dbAvatar, ok := storage.GetUser(req.Openid); ok {
+			if req.Nickname == "" {
+				req.Nickname = dbNick
+			}
+			if req.AvatarUrl == "" {
+				req.AvatarUrl = dbAvatar
+			}
+		}
 	}
 	if req.Nickname == "" {
 		req.Nickname = "玩家" + tail4(req.Openid)
@@ -245,6 +257,11 @@ type KickBotReq struct {
 	Openid string `json:"openid"`
 }
 
+// KickPlayerReq 踢出真人玩家载荷
+type KickPlayerReq struct {
+	Openid string `json:"openid"`
+}
+
 // HandleAddBot 处理「添加电脑玩家」
 // 仅房主、仅 PhaseWaiting、人数未满才允许
 func HandleAddBot(s *session.Session, raw json.RawMessage, reqID json.RawMessage) {
@@ -319,6 +336,76 @@ func HandleKickBot(s *session.Session, raw json.RawMessage, reqID json.RawMessag
 	r.BroadcastState()
 	r.Unlock()
 	s.Send(protocol.MsgRoomKickBotOK, map[string]any{"openid": req.Openid}, reqID)
+}
+
+// HandleKickPlayer 处理「踢出真人玩家」
+// 仅房主、仅 PhaseWaiting / PhaseMatchEnd、目标必须是非自身的真人玩家
+// 踢出前先单播 ROOM_KICKED 通知被踢者，再从房间内移除并广播 ROOM_STATE；
+// 若踢出后房间无真人，按既有 LeaveRoom 流程销毁房间
+func HandleKickPlayer(s *session.Session, raw json.RawMessage, reqID json.RawMessage) {
+	r := room.GetRoom(s.RoomID)
+	if r == nil {
+		s.SendError(protocol.ErrNotInRoom, "未在房间", reqID)
+		return
+	}
+	var req KickPlayerReq
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &req)
+	}
+	if req.Openid == "" {
+		s.SendError(protocol.ErrBadRequest, "缺少 openid", reqID)
+		return
+	}
+	if req.Openid == s.Openid {
+		s.SendError(protocol.ErrBadRequest, "房主不可踢出自己", reqID)
+		return
+	}
+	r.Lock()
+	if r.HostID != s.Openid {
+		r.Unlock()
+		s.SendError(protocol.ErrNotHost, "仅房主可操作", reqID)
+		return
+	}
+	if r.Phase != room.PhaseWaiting && r.Phase != room.PhaseMatchEnd {
+		r.Unlock()
+		s.SendError(protocol.ErrRoomNotWaiting, "对局进行中，无法踢出", reqID)
+		return
+	}
+	target := r.GetPlayer(req.Openid)
+	if target == nil {
+		r.Unlock()
+		s.SendError(protocol.ErrBadRequest, "目标玩家不存在", reqID)
+		return
+	}
+	if target.IsBot {
+		r.Unlock()
+		s.SendError(protocol.ErrBadRequest, "请使用踢出电脑玩家协议", reqID)
+		return
+	}
+	// 抓取被踢真人的会话，用于在解锁前先单播 ROOM_KICKED
+	targetNick := target.Nickname
+	targetSession := session.GetByOpenid(req.Openid)
+	if targetSession != nil {
+		targetSession.Send(protocol.MsgRoomKicked, map[string]any{
+			"roomId": r.ID,
+			"reason": "host_kick",
+		}, nil)
+		// 清空被踢者的房间绑定，避免其后续误用旧 RoomID
+		targetSession.RoomID = ""
+	}
+	// 取消被踢者可能仍在跑的离线兜底定时器
+	room.CancelOfflineTimer(req.Openid)
+	r.RemovePlayer(req.Openid)
+	logger.Info("房间 %s 房主 %s 踢出真人玩家 %s(%s)", r.ID, s.Openid, targetNick, req.Openid)
+	needDestroy := r.HumanCount() == 0
+	if !needDestroy {
+		r.BroadcastState()
+	}
+	r.Unlock()
+	if needDestroy {
+		room.DestroyRoom(r.ID)
+	}
+	s.Send(protocol.MsgRoomKickPlayerOK, map[string]any{"openid": req.Openid}, reqID)
 }
 
 // tail4 取字符串末尾 4 位（用于默认昵称）

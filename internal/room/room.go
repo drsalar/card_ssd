@@ -69,6 +69,8 @@ type Room struct {
 	LastActiveAt int64
 	// voteTimer 投票解散 60 秒倒计时定时器
 	voteTimer *time.Timer
+	// dirty 持久化层脏标记：业务变更后置 true，由 persister 节流批量落库
+	dirty bool
 
 	mu sync.Mutex
 }
@@ -123,13 +125,15 @@ func (r *Room) AddPlayer(s *session.Session) *Player {
 	}
 	r.Players = append(r.Players, p)
 	r.LastActiveAt = time.Now().UnixMilli()
+	r.dirty = true
 	return p
 }
 
 // Touch 更新房间最近活跃时间戳
-// 调用前应当已加锁。
+// 调用前应当已加锁。同时把房间标记为 dirty 让 persister 节流落库。
 func (r *Room) Touch() {
 	r.LastActiveAt = time.Now().UnixMilli()
+	r.dirty = true
 }
 
 // ReconnectPlayer 玩家重连：刷新连接信息
@@ -148,9 +152,11 @@ func (r *Room) ReconnectPlayer(s *session.Session) *Player {
 	p.Offline = false
 	p.OfflineSince = 0
 	r.LastActiveAt = time.Now().UnixMilli()
+	r.dirty = true
 	return p
 }
 
+// RemovePlayer
 // RemovePlayer 移除玩家，返回被移除的 Player（房主转移在此处理）
 func (r *Room) RemovePlayer(openid string) *Player {
 	for i, p := range r.Players {
@@ -159,6 +165,7 @@ func (r *Room) RemovePlayer(openid string) *Player {
 			if r.HostID == openid && len(r.Players) > 0 {
 				r.HostID = r.Players[0].Openid
 			}
+			r.dirty = true
 			return p
 		}
 	}
@@ -300,6 +307,7 @@ func (r *Room) AddBot() *Player {
 		IsBot:     true,
 	}
 	r.Players = append(r.Players, p)
+	r.dirty = true
 	return p
 }
 
@@ -309,6 +317,7 @@ func (r *Room) RemoveBot(openid string) bool {
 	for i, p := range r.Players {
 		if p.Openid == openid && p.IsBot {
 			r.Players = append(r.Players[:i], r.Players[i+1:]...)
+			r.dirty = true
 			return true
 		}
 	}

@@ -3,6 +3,9 @@ package session
 
 import (
 	"sync"
+	"time"
+
+	"card_ssd/internal/storage"
 )
 
 // TokenInfo HTTP 登录后存储的身份信息
@@ -11,6 +14,9 @@ type TokenInfo struct {
 	Nickname  string
 	AvatarUrl string
 }
+
+// TokenTTL token 默认有效期（7 天）
+const TokenTTL = 7 * 24 * time.Hour
 
 var (
 	mu sync.RWMutex
@@ -66,18 +72,36 @@ func GetByOpenid(openid string) *Session {
 }
 
 // SaveToken 保存 token → 身份映射
+// 同时写入持久化层（DB 未启用时为空操作）
 func SaveToken(token string, info TokenInfo) {
 	mu.Lock()
-	defer mu.Unlock()
 	tokens[token] = info
+	mu.Unlock()
+	storage.SaveToken(token, info.Openid, info.Nickname, info.AvatarUrl, time.Now().Add(TokenTTL))
 }
 
 // LookupByToken 通过 token 查找身份
+// 内存命中即返回；未命中时回查 DB 并补回内存（DB 未启用或不存在 / 已过期返回 false）
 func LookupByToken(token string) (TokenInfo, bool) {
 	mu.RLock()
-	defer mu.RUnlock()
 	info, ok := tokens[token]
-	return info, ok
+	mu.RUnlock()
+	if ok {
+		return info, true
+	}
+	dbInfo, found := storage.LoadToken(token)
+	if !found {
+		return TokenInfo{}, false
+	}
+	info = TokenInfo{
+		Openid:    dbInfo.Openid,
+		Nickname:  dbInfo.Nickname,
+		AvatarUrl: dbInfo.AvatarUrl,
+	}
+	mu.Lock()
+	tokens[token] = info
+	mu.Unlock()
+	return info, true
 }
 
 // CountConns 当前连接数

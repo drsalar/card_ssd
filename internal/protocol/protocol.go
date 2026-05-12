@@ -31,6 +31,11 @@ const (
 	MsgRoomKickBot   = "ROOM_KICK_BOT"
 	MsgRoomKickBotOK = "ROOM_KICK_BOT_OK"
 
+	// 房主踢出真人玩家相关协议
+	MsgRoomKickPlayer   = "ROOM_KICK_PLAYER"    // 客户端 → 服务端：房主请求踢出真人玩家
+	MsgRoomKickPlayerOK = "ROOM_KICK_PLAYER_OK" // 服务端 → 客户端：踢人成功回执
+	MsgRoomKicked       = "ROOM_KICKED"         // 服务端 → 客户端：被踢通知（单播给被踢玩家）
+
 	// 投票解散对局相关协议
 	MsgVoteDissolve        = "VOTE_DISSOLVE"         // 客户端 → 服务端：发起/同意解散
 	MsgVoteDissolveCancel  = "VOTE_DISSOLVE_CANCEL"  // 客户端 → 服务端：撤销同意

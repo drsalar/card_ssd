@@ -10,6 +10,7 @@ import (
 	"card_ssd/internal/protocol"
 	"card_ssd/internal/room"
 	"card_ssd/internal/session"
+	"card_ssd/internal/storage"
 )
 
 // SubmitLanesReq 提交三道载荷
@@ -168,10 +169,16 @@ func DoSettle(r *room.Room) {
 	}
 	roomID := r.ID
 	currentRound := r.CurrentRound
+	withMa := r.Rule.WithMa
+	totalRounds := r.Rule.TotalRounds
 	r.Broadcast(protocol.MsgSettleResult, payload, "")
 	r.BroadcastState()
 	r.Unlock()
 	logger.Info("房间 %s 第 %d 局结算完成", roomID, currentRound)
+	// 异步落库本局结算结果（DB 未启用时为空操作；失败仅 WARN）
+	if buf, err := json.Marshal(result); err == nil {
+		go storage.SaveMatchResult(roomID, currentRound, withMa, totalRounds, buf)
+	}
 	// 进入比牌确认阶段后，电脑玩家自动确认
 	room.ScheduleAllBotsConfirm(r)
 }

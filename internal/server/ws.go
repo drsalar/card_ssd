@@ -76,6 +76,8 @@ func dispatch(s *session.Session, env *protocol.Envelope) {
 		handler.HandleAddBot(s, env.Data, env.ReqID)
 	case protocol.MsgRoomKickBot:
 		handler.HandleKickBot(s, env.Data, env.ReqID)
+	case protocol.MsgRoomKickPlayer:
+		handler.HandleKickPlayer(s, env.Data, env.ReqID)
 	case protocol.MsgVoteDissolve:
 		handler.HandleVoteDissolve(s, env.Data, env.ReqID)
 	case protocol.MsgVoteDissolveCancel:

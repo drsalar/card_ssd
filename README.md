@@ -5,7 +5,8 @@
 - HTTP 框架：[gin-gonic/gin](https://github.com/gin-gonic/gin)
 - WebSocket 框架：[gorilla/websocket](https://github.com/gorilla/websocket)
 - 通信分层：**主页与普通请求走 HTTP**，**对局相关实时通信走 WebSocket**
-- 状态：所有房间/对局信息保留在服务端进程内存中；进行中的房间在所有真人离线后会保留 24 小时，由每小时巡检销毁
+- 状态：用户档案 / 登录 token / 未结束房间 / 历史对局结果可选持久化到 **MySQL**；进程未配置 `MYSQL_PWD` 时整体降级为纯内存模式（不阻塞启动）
+- 进行中的房间在所有真人离线后会保留 24 小时，由每小时巡检销毁
 - 语言：Go 1.24+
 
 ## 启动方式
@@ -26,6 +27,48 @@ $env:PORT="9090"; go run .
 
 - WebSocket 地址：`ws://127.0.0.1/ws`
 - HTTP 健康检查：`http://127.0.0.1/api/health`
+
+## 环境变量
+
+| 变量名       | 必选 | 说明                                                                                       |
+| ------------ | ---- | ------------------------------------------------------------------------------------------ |
+| `PORT`       | 否   | HTTP 监听端口，默认 `80`                                                                   |
+| `WX_APPID`   | 否   | 微信小游戏 AppID，配合 `WX_SECRET` 用于服务端解 `wx.login` 的 `code`；未配置时退化为读取请求头 `X-WX-OPENID`（云托管会自动注入） |
+| `WX_SECRET`  | 否   | 微信小游戏 AppSecret，与 `WX_APPID` 配套                                                   |
+| `MYSQL_PWD`  | 否   | MySQL 登录密码；**未配置时整体降级为内存模式**，所有 `Save*/Load*` 直接为 nil 兜底         |
+| `MYSQL_HOST` | 否   | MySQL 地址，默认 `10.31.102.121:3306`                                                       |
+| `MYSQL_USER` | 否   | MySQL 用户名，默认 `root`                                                                   |
+| `MYSQL_DB`   | 否   | MySQL 库名，默认 `card_ssd`                                                                 |
+
+## 微信登录链路（方案 B）
+
+小游戏端 `js/main.js → initUser` 不再生成本地 `guest_xxxx` 作为 openid，而是异步调用 `wx.login` 取临时 `code`。`js/scenes/lobby_scene.js → _httpLogin` 把 `{ code, nickname, avatarUrl }` 提交到 `POST /api/login`：
+
+1. 服务端优先用 `code` 调用 `https://api.weixin.qq.com/sns/jscode2session` 解出真实 `openid`（凭 `WX_APPID/WX_SECRET`）
+2. `code` 失败时退化为读取请求头 `X-WX-OPENID`（云托管侧自动注入）
+3. 兼容 body.openid（仅本地调试 / 老客户端）
+4. 三步均失败 → 返回 `400 登录失败`
+
+服务端会把 `openid → nickname/avatarUrl` UPSERT 到 `users` 表，并在客户端未带昵称头像时从该表回填，避免「玩家xxxx」。客户端拿到响应后会把 `openid` 写回 `wx.setStorageSync('openid', ...)` 与 `databus.user.openid`，后续 WS `LOGIN` 帧、`/api/lobby/active-room` 都使用真实 openid。
+
+## MySQL 持久化
+
+服务启动时 `internal/storage` 包会按需建立 MySQL 连接池并自动执行内置 DDL（`CREATE TABLE IF NOT EXISTS`）。表结构如下：
+
+| 表名            | 主要字段 / 用途                                                                                                                  |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `users`         | `openid PK / nickname / avatar_url / created_at / updated_at`，存放微信授权得到的昵称头像                                          |
+| `auth_tokens`   | `token PK / openid / nickname / avatar_url / expires_at`，HTTP 登录颁发的 7 天 token；启动时清理过期记录                            |
+| `rooms`         | `room_id PK / host_openid / phase / current_round / total_rounds / max_players / with_ma / last_active_at / all_offline_since / destroyed`，未结束房间快照 |
+| `room_players`  | `(room_id, openid) PK / seat / nickname / avatar_url / score / is_bot / offline / hand(JSON) / lanes(JSON) / submitted / round_confirmed / vote_dissolve` |
+| `match_results` | `id PK / room_id / round / with_ma / total_rounds / payload(JSON) / created_at`，每局结算结果，便于后续做战绩 / 历史回顾            |
+
+关键设计：
+
+- **降级策略**：未配置 `MYSQL_PWD` / 连接失败 / 迁移失败时，`storage.DB() == nil`，所有 `Save*/Load*` 直接 `return`，业务逻辑保持纯内存运行。
+- **节流写盘**：`internal/room/persister.go` 维护房间维度 `dirty` 标记，后台 1 秒批量落库 `rooms` + `room_players`；进程退出 / 房间销毁等关键节点立即同步刷盘。
+- **启动恢复**：`room.LoadFromStorage()` 会把 `destroyed=0` 的房间及玩家全量还原到内存，所有玩家初始为 `Offline=true` 等待真人重连，由既有 24h 巡检负责销毁过期房间。
+- **错误处理**：写库失败一律 `WARN` 不向上抛 panic，不阻塞当前请求。
 
 客户端默认走微信云托管通道（`wx.cloud.callContainer` / `wx.cloud.connectContainer`），本地调试可在 [js/main.js](../js/main.js) 中调整 `GameGlobal.HTTP_BASE` / `GameGlobal.SOCKET_URL` 为本地地址，并在浏览器/无 `wx.cloud` 环境下自动降级使用。
 
@@ -84,11 +127,14 @@ JSON 信封：`{ type, data, reqId, code, msg }`。
 | `SUBMIT_LANES`                                    | C→S    | 提交三道开牌                      |
 | `ROUND_CONFIRM`                                   | C→S    | 确认本局结算                      |
 | `ROOM_ADD_BOT` / `ROOM_KICK_BOT`                  | C→S    | 房主添加/踢出电脑玩家              |
+| `ROOM_KICK_PLAYER`                                | C→S    | 房主踢出真人玩家（waiting / match_end 阶段） |
+| `ROOM_KICKED`                                     | S→C    | 被踢玩家单播通知                  |
 | `VOTE_DISSOLVE` / `VOTE_DISSOLVE_CANCEL`          | C→S    | 发起/同意 / 撤销投票解散         |
 | `VOTE_DISSOLVE_TIMEOUT`                           | S→C    | 投票解散 60 秒超时广播           |
 | `LOGIN_OK` / `CREATE_ROOM_OK` / `JOIN_ROOM_OK`    | S→C    | 应答                              |
 | `LEAVE_ROOM_OK` / `SUBMIT_LANES_OK`               | S→C    | 应答                              |
 | `ROOM_ADD_BOT_OK` / `ROOM_KICK_BOT_OK`            | S→C    | 电脑玩家操作应答                  |
+| `ROOM_KICK_PLAYER_OK`                             | S→C    | 踢出真人玩家应答                  |
 | `ROOM_STATE`                                      | S→C    | 房间状态广播                      |
 | `DEAL_CARDS`                                      | S→C    | 私发手牌                          |
 | `SETTLE_RESULT`                                   | S→C    | 比牌结算广播                      |
@@ -100,8 +146,10 @@ JSON 信封：`{ type, data, reqId, code, msg }`。
 
 ## 数据生命周期
 
-- 所有房间与对局信息仅保存在服务端进程内存中
-- 房间内最后一名玩家**主动离开**时，房间立即从内存销毁
+- 用户档案 / 登录 token / 未结束房间 / 历史结算 在配置 `MYSQL_PWD` 时持久化到 MySQL；未配置时降级为纯内存（重启即清空）
+- 房间内最后一名玩家**主动离开**时，房间立即从内存销毁并写 `rooms.destroyed=1`
+- **进行中房间 24 小时保活**：当房间处于 `playing/comparing/match_end` 且所有真人玩家都离线时，服务端会登记 `AllOfflineSince`，任一真人重连即清零；`StartIdleSweeper` 每小时巡检一次，销毁“超过 24 小时仍未有真人上线”的房间
+- 服务端进程重启：通过 `room.LoadFromStorage()` 把 `destroyed=0` 的房间整体还原到内存，全员视为离线，等待玩家重连后由原有重连流程恢复手牌 / 三道 / 阶段
 - **进行中房间 24 小时保活**：当房间处于 `playing/comparing/match_end` 且所有真人玩家都离线时，服务端会登记 `AllOfflineSince`，任一真人重连即清零；`StartIdleSweeper` 每小时巡检一次，销毁“超过 24 小时仍未有真人上线”的房间
 - 玩家断线 30 秒未重连的阶段化兜底：
   - 准备阶段（`waiting`）：连接断开瞬间即移除
@@ -135,6 +183,13 @@ JSON 信封：`{ type, data, reqId, code, msg }`。
 
 // 房主踢出电脑玩家
 { "type": "ROOM_KICK_BOT", "data": { "openid": "bot_1234_1" }, "reqId": 2 }
+
+// 房主踢出真人玩家（仅 waiting / match_end 阶段允许）
+{ "type": "ROOM_KICK_PLAYER", "data": { "openid": "o_xxx" }, "reqId": 3 }
+// 服务端会先向被踢玩家单播：
+{ "type": "ROOM_KICKED", "data": { "roomId": "1234", "reason": "host_kick" } }
+// 随后向房主回应：
+{ "type": "ROOM_KICK_PLAYER_OK", "data": { "openid": "o_xxx" }, "reqId": 3 }
 ```
 
 ### 服务端行为
@@ -144,6 +199,18 @@ JSON 信封：`{ type, data, reqId, code, msg }`。
 - **结算/总结**：进入 `comparing`/`match_end` 后 1 秒内自动确认，避免房间销毁流程被阻塞
 - **销毁清理**：房间销毁时统一停止 `botTimers`，避免协程泄漏
 - **限制**：仅房主、仅 `waiting` 阶段、仅在未达 `rule.maxPlayers` 时才允许添加
+
+## 房主踢出真人玩家
+
+除了踢出电脑之外，房主还可在 `waiting` / `match_end` 阶段踢出任意非自身的真人玩家，复用同一个座位点击交互。
+
+### 服务端行为
+
+- **鉴权**：非房主返回 `ErrNotHost(1009)`；阶段不是 `waiting` 或 `match_end` 返回 `ErrRoomNotWaiting(1010)`；目标等于调用者 openid 返回 `ErrBadRequest(1008)`；目标不在房间返回 `ErrBadRequest`。
+- **踢出顺序**：先向被踢玩家单播 `ROOM_KICKED`（携带 `roomId` / `reason="host_kick"`）并清空其 `Session.RoomID`，随后调用 `CancelOfflineTimer` 释放可能挂起的离线计时器，再从 `r.Players` 中移除。
+- **后续处理**：房间仍有真人时广播新的 `ROOM_STATE`；如果踢出后无任何真人则走与 `LeaveRoom` 一致的房间销毁流程（含 bot 定时器清理与持久层销毁标记）。
+- **日志审计**：`logger.Info("房间 X 房主 Y 踢出真人玩家 Z(昵称)")`。
+- **与投票解散兼容**：被踢玩家随 `RemovePlayer` 从投票集合中自动退出，不需额外处理。
 
 ### AI 理牌策略
 

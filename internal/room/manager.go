@@ -11,6 +11,7 @@ import (
 	"card_ssd/internal/game"
 	"card_ssd/internal/logger"
 	"card_ssd/internal/session"
+	"card_ssd/internal/storage"
 )
 
 // JoinError 加入房间错误码
@@ -82,6 +83,7 @@ func CreateRoom(rule Rule, hostOpenid string) *Room {
 	defer rmu.Unlock()
 	id := genRoomID()
 	r := NewRoom(id, rule, hostOpenid)
+	r.dirty = true
 	rooms[id] = r
 	logger.Info("创建房间 %s 房主=%s", id, hostOpenid)
 	return r
@@ -111,6 +113,8 @@ func DestroyRoom(id string) {
 	r.CancelBotTimers()
 	r.CancelVoteTimer()
 	r.Unlock()
+	// 同步落库销毁标记，避免重启后继续加载该房间
+	storage.MarkRoomDestroyed(id)
 	logger.Info("销毁房间 %s", id)
 }
 
@@ -133,6 +137,8 @@ func JoinRoom(roomID string, s *session.Session) JoinResult {
 	if r.GetPlayer(s.Openid) != nil {
 		p := r.ReconnectPlayer(s)
 		cancelOfflineTimer(s.Openid)
+		// 重连后若房间仍有在线真人，清零 AllOfflineSince，避免 sweeper 按旧时间销毁
+		markAllOfflineIfNeeded(r)
 		s.RoomID = r.ID
 		return JoinResult{Room: r, Player: p, Reconnect: true}
 	}
@@ -174,30 +180,32 @@ func LeaveRoom(s *session.Session) *LeaveResult {
 }
 
 // markAllOfflineIfNeeded 评估并更新房间的 AllOfflineSince 时间戳
-// 调用前应已持有 r.mu。仅 Phase 为 playing/comparing/match_end 且无在线真人时记录起始时间，
-// 任意一名真人重连 / 有玩家在线时清零
+// 调用前应已持有 r.mu。所有阶段（waiting/playing/comparing/match_end）统一规则：
+// 无在线真人时记录起始时间；任意一名真人在线时清零。
+// waiting 阶段同样纳入 24h 保活，断线后房间不会立即销毁，由 sweeper 兜底回收。
 func markAllOfflineIfNeeded(r *Room) {
 	if r == nil {
 		return
 	}
-	// waiting 阶段沉默：调用者主动在 waiting 阶段清零不一定需要处理，这里依据在线状况统一设置
-	if r.Phase == PhaseWaiting {
-		r.AllOfflineSince = 0
-		return
-	}
+	old := r.AllOfflineSince
 	if hasOnlineHuman(r) {
 		r.AllOfflineSince = 0
-		return
-	}
-	// 仅在未设置起始时间时设置，避免重复覆盖导致超时计算偏迟
-	if r.AllOfflineSince == 0 {
+	} else if r.AllOfflineSince == 0 {
+		// 仅在未设置起始时间时设置，避免重复覆盖导致超时计算偏迟
 		r.AllOfflineSince = time.Now().UnixMilli()
+	}
+	if old != r.AllOfflineSince {
+		r.dirty = true
 	}
 }
 
 // HandleDisconnect 处理断线
-// waiting 阶段直接移除；游戏阶段标记掉线 + 30 秒计时器兌底
-// 顶号场景：新连接已绑定同 openid，旧连接被关闭触发本函数，需跳过以免误标 Offline
+// 所有阶段统一标记掉线（保留座位）：
+//   - waiting：仅标记 Offline + 登记 AllOfflineSince，不启动 30s 兜底计时器，由 24h sweeper 销毁；
+//     这样玩家从大厅可以「重新进入」继续等待开局或邀请好友。
+//   - playing/comparing/match_end：标记 Offline + 30s 兜底计时器（散牌兜底/踢出占座等）。
+//
+// 顶号场景：新连接已绑定同 openid，旧连接被关闭触发本函数，需跳过以免误标 Offline。
 func HandleDisconnect(s *session.Session) {
 	if s.RoomID == "" {
 		return
@@ -219,24 +227,19 @@ func HandleDisconnect(s *session.Session) {
 		r.Unlock()
 		return
 	}
-	if r.Phase == PhaseWaiting {
-		r.RemovePlayer(s.Openid)
-		needDestroy := r.HumanCount() == 0
-		if !needDestroy {
-			r.BroadcastState()
-		}
-		r.Unlock()
-		if needDestroy {
-			DestroyRoom(r.ID)
-		}
-		return
-	}
-	// 对局中标记掉线
+	// 标记掉线（保留座位），所有阶段统一处理
 	p.Offline = true
 	p.OfflineSince = time.Now().UnixMilli()
+	r.dirty = true
 	markAllOfflineIfNeeded(r)
 	r.BroadcastState()
+	phase := r.Phase
 	r.Unlock()
+
+	// waiting 阶段不需要 30s 兜底（没有需要自动提交的牌局），由 24h sweeper 接管
+	if phase == PhaseWaiting {
+		return
+	}
 
 	// 启动 30 秒兜底计时器
 	cancelOfflineTimer(s.Openid)

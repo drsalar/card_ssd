@@ -13,6 +13,7 @@ import (
 	"card_ssd/internal/logger"
 	"card_ssd/internal/room"
 	"card_ssd/internal/server"
+	"card_ssd/internal/storage"
 )
 
 func main() {
@@ -22,6 +23,12 @@ func main() {
 		port = "80"
 	}
 	addr := ":" + port
+
+	// 初始化持久化层（未配置 MYSQL_PWD 时降级为内存模式，不阻塞启动）
+	_ = storage.Init()
+
+	// 从持久化层恢复未销毁的房间（DB 未启用时为空操作）
+	room.LoadFromStorage()
 
 	// 构建 Gin 路由（同时挂载 HTTP API 与 /ws WebSocket）
 	engine := server.NewEngine()
@@ -35,6 +42,11 @@ func main() {
 	sweeperCtx, cancelSweeper := context.WithCancel(context.Background())
 	defer cancelSweeper()
 	room.StartIdleSweeper(sweeperCtx, room.SweeperDefaultInterval, room.SweeperDefaultThreshold)
+
+	// 启动房间持久化节流任务（dirty 标记每秒批量落库）
+	persisterCtx, cancelPersister := context.WithCancel(context.Background())
+	defer cancelPersister()
+	room.StartPersister(persisterCtx)
 
 	// 异步启动 HTTP 服务
 	go func() {
@@ -53,6 +65,9 @@ func main() {
 
 	// 取消巡检任务
 	cancelSweeper()
+	cancelPersister()
+	// 在关闭 HTTP / 连接前刷一次最后的脏数据
+	room.FlushAll()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -61,5 +76,7 @@ func main() {
 	if err := httpServer.Shutdown(ctx); err != nil {
 		logger.Error("HTTP 关闭异常: %v", err)
 	}
+	// 关闭 MySQL 连接池
+	_ = storage.Close()
 	logger.Info("服务端已退出")
 }
