@@ -66,7 +66,7 @@ func Evaluate(cards []Card, isHead bool) HandResult {
 
 	// 同花顺
 	if flush && hasStraight {
-		return HandResult{Type: TypeStraightFlush, Name: TypeName[TypeStraightFlush], Ranks: []int{straightTop}}
+		return HandResult{Type: TypeStraightFlush, Name: TypeName[TypeStraightFlush], Ranks: straightRanks(cards, straightTop)}
 	}
 	// 炸弹（4 张同点 + 单张 kicker）
 	if counts[0] == 4 {
@@ -116,7 +116,7 @@ func Evaluate(cards []Card, isHead bool) HandResult {
 	}
 	// 顺子
 	if hasStraight {
-		return HandResult{Type: TypeStraight, Name: TypeName[TypeStraight], Ranks: []int{straightTop}}
+		return HandResult{Type: TypeStraight, Name: TypeName[TypeStraight], Ranks: straightRanks(cards, straightTop)}
 	}
 	// 三条（中尾道）
 	if counts[0] == 3 {
@@ -252,8 +252,11 @@ func isFlush(cards []Card) bool {
 }
 
 // checkStraight 是否顺子
-// 返回 (top, ok)：top 为顶点
-// 1-2-3-4-5 → top=5；10-J-Q-K-A → top=14；普通 → top=最大点
+// 返回 (top, ok)：top 为顺子大小排序用顶点值
+// 普通顺子（不含 A）→ top=最大点（5..13）
+// 10-J-Q-K-A → top=14（最大顺子）
+// A-2-3-4-5  → top=13（特殊：仅小于 10-A，大于其他所有顺子）
+//	            注意会与 9-10-J-Q-K（top=13）冲突，由调用方在 ranks 第 2 位附加区分位（A2345 附 14；其他顺子附 0）
 func checkStraight(cards []Card) (int, bool) {
 	if len(cards) != 5 {
 		return 0, false
@@ -268,22 +271,39 @@ func checkStraight(cards []Card) (int, bool) {
 			return 0, false
 		}
 	}
+	// 1-2-3-4-5：A 当 1 用，A 在 ranks 中以 1 表示，故排序后 = [1,2,3,4,5]
+	// 提前拦截，避免被下方"差值 4"分支当作普通顺子识别
+	if ranks[0] == 1 && ranks[1] == 2 && ranks[2] == 3 && ranks[3] == 4 && ranks[4] == 5 {
+		return 13, true
+	}
 	// 普通顺子：差值正好为 4
 	if ranks[4]-ranks[0] == 4 {
-		if ranks[4] == 1 {
-			return 14, true
-		}
 		return ranks[4], true
 	}
 	// 10-J-Q-K-A: 排序后 = [1,10,11,12,13]
 	if ranks[0] == 1 && ranks[1] == 10 && ranks[2] == 11 && ranks[3] == 12 && ranks[4] == 13 {
 		return 14, true
 	}
-	// 1-2-3-4-5
-	if ranks[0] == 1 && ranks[1] == 2 && ranks[2] == 3 && ranks[3] == 4 && ranks[4] == 5 {
-		return 5, true
-	}
 	return 0, false
+}
+
+// straightRanks 根据顺子的 5 张牌生成用于比牌的 ranks 数组
+// 普通顺子返回 [top]；A-2-3-4-5 返回 [13, 14]，确保它仅次于 10-A、大于其他所有顺子
+func straightRanks(cards []Card, top int) []int {
+	if top == 13 {
+		// 只有 A-2-3-4-5 会返回 top=13 且最小点为 1
+		minRank := cards[0].Rank
+		for _, c := range cards[1:] {
+			if c.Rank < minRank {
+				minRank = c.Rank
+			}
+		}
+		if minRank == 1 {
+			// A2345：ranks=[13, 14]，与 9-K 顺子（ranks=[13]，第 2 位补 0）做区分
+			return []int{13, 14}
+		}
+	}
+	return []int{top}
 }
 
 // countPairs 数对子组数（同花带对加色规则）
